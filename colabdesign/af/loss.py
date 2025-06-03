@@ -32,43 +32,64 @@ class _af_loss:
     # unsupervised losses
     self._loss_unsupervised(inputs, outputs, aux)
 
-  def _loss_binder(self, inputs, outputs, aux):
-    '''get losses'''
-    opt = inputs["opt"]
-    mask = inputs["seq_mask"]
+  def _loss_binder(self, 
+                   main_inputs, 
+                   main_outputs, 
+                   negative_inputs, 
+                   negative_outputs, 
+                   aux):
+    '''get losses
+    
+    main_outputs: output of prediction with main target (output)
+    negative_inputs: input of prediction with negative targets (list of inputs)
+    negative_outputs: output of prediction with negative targets (list of outputs)
+    '''
+    opt = main_inputs["opt"]
+    mask = main_inputs["seq_mask"]
     zeros = jnp.zeros_like(mask)
-    tL,bL = self._target_len, self._binder_len
+    tL,bL = self.main_target._target_len, self._binder_len
     binder_id = zeros.at[-bL:].set(mask[-bL:])
     if "hotspot" in opt:
       target_id = zeros.at[opt["hotspot"]].set(mask[opt["hotspot"]])
-      i_con_loss = get_con_loss(inputs, outputs, opt["i_con"], mask_1d=target_id, mask_1b=binder_id)
+      i_con_loss = get_con_loss(main_inputs, 
+                                main_outputs, 
+                                opt["i_con"], 
+                                mask_1d=target_id, 
+                                mask_1b=binder_id)
     else:
       target_id = zeros.at[:tL].set(mask[:tL])
-      i_con_loss = get_con_loss(inputs, outputs, opt["i_con"], mask_1d=binder_id, mask_1b=target_id)
+      i_con_loss = get_con_loss(main_inputs, 
+                                main_outputs, 
+                                opt["i_con"], 
+                                mask_1d=binder_id, 
+                                mask_1b=target_id
+                               )
 
     # unsupervised losses
     aux["losses"].update({
-      "plddt":   get_plddt_loss(outputs, mask_1d=binder_id), # plddt over binder
-      "exp_res": get_exp_res_loss(outputs, mask_1d=binder_id),
-      "pae":     get_pae_loss(outputs, mask_1d=binder_id), # pae over binder + interface
-      "con":     get_con_loss(inputs, outputs, opt["con"], mask_1d=binder_id, mask_1b=binder_id),
+      "plddt":   get_plddt_loss(main_outputs, mask_1d=binder_id), # plddt over binder
+      "exp_res": get_exp_res_loss(main_outputs, mask_1d=binder_id),
+      "pae":     get_pae_loss(main_outputs, mask_1d=binder_id), # pae over binder + interface
+      "con":     get_con_loss(main_inputs, main_outputs, opt["con"], mask_1d=binder_id, mask_1b=binder_id),
       # interface
       "i_con":   i_con_loss,
-      "i_pae":   get_pae_loss(outputs, mask_1d=binder_id, mask_1b=target_id),
+      "i_pae":   get_pae_loss(main_outputs, mask_1d=binder_id, mask_1b=target_id),
     })
+
+    # TODO calculate selectivity loss here
 
     # supervised losses
     if self._args["redesign"]:      
   
-      aln = get_rmsd_loss(inputs, outputs, L=tL, include_L=False)
+      aln = get_rmsd_loss(main_inputs, main_outputs, L=tL, include_L=False)
       align_fn = aln["align"]
       
       # compute cce of binder + interface
-      aatype = inputs["aatype"]
-      cce = get_dgram_loss(inputs, outputs, aatype=aatype, return_mtx=True)
+      aatype = main_inputs["aatype"]
+      cce = get_dgram_loss(main_inputs, main_outputs, aatype=aatype, return_mtx=True)
 
       # compute fape
-      fape = get_fape_loss(inputs, outputs, clamp=opt["fape_cutoff"], return_mtx=True)
+      fape = get_fape_loss(main_inputs, main_outputs, clamp=opt["fape_cutoff"], return_mtx=True)
 
       aux["losses"].update({
         "rmsd":      aln["rmsd"],
@@ -77,7 +98,7 @@ class _af_loss:
       })
 
     else:
-      align_fn = get_rmsd_loss(inputs, outputs, L=tL)["align"]
+      align_fn = get_rmsd_loss(main_inputs, main_outputs, L=tL)["align"]
 
     if self._args["realign"]:
       aux["atom_positions"] = align_fn(aux["atom_positions"]) * aux["atom_mask"][...,None]

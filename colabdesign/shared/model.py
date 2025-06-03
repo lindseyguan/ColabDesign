@@ -123,7 +123,12 @@ class design_model:
 
     # set seq/bias/state
     self._params["seq"] = x
-    self._inputs["bias"] = b 
+    if self.protocol == 'binder':
+      self.main_target._inputs["bias"] = b
+      for target in self.negative_targets:
+        target._inputs["bias"] = b
+    else:
+      self._inputs["bias"] = b 
 
   def _norm_seq_grad(self):
     g = self.aux["grad"]["seq"]

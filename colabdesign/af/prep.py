@@ -34,6 +34,24 @@ class _af_prep:
     self._opt = copy_dict(self.opt)  
     self.restart(**kwargs)
 
+  def _prep_model_binder(self, **kwargs):
+    '''prep model'''
+    if not hasattr(self,"_model") or self._cfg != self._model["runner"].config:
+      self._cfg.model.global_config.subbatch_size = None
+      self._model = self._get_model_binder(self._cfg)
+      long_inputs = False
+      if sum(self.main_target._lengths) > 384:
+        long_inputs = True
+      for neg_target in self.negative_targets:
+        if sum(neg_target._lengths) > 384:
+          long_inputs = True
+      if long_inputs:
+        self._cfg.model.global_config.subbatch_size = 4
+        self._model["fn"] = self._get_model_binder(self._cfg)["fn"]
+
+    self._opt = copy_dict(self.opt)
+    self.restart(**kwargs)
+
   def _prep_features(self, num_res, num_seq=None, num_templates=1):
     '''process features'''
     if num_seq is None: num_seq = self._num
@@ -173,8 +191,11 @@ class _af_prep:
 
     self._prep_model(**kwargs)
 
-  def _prep_binder(self, pdb_filename,
-                   target_chain="A", binder_len=50,                                         
+  def _prep_binder(self, 
+                   main_target,
+                   negative_targets=[],
+
+                   binder_len=50,                                         
                    rm_target = False,
                    rm_target_seq = False,
                    rm_target_sc = False,
@@ -185,8 +206,9 @@ class _af_prep:
                    rm_binder_seq=True,
                    rm_binder_sc=True,
                    rm_template_ic=False,
-                                      
-                   hotspot=None, ignore_missing=True, **kwargs):
+
+                   ignore_missing=True, 
+                   **kwargs):
     '''
     prep inputs for binder design
     ---------------------------------------------------
@@ -206,66 +228,99 @@ class _af_prep:
     self._args.update({"redesign":redesign})
 
     # get pdb info
-    target_chain = kwargs.pop("chain",target_chain) # backward comp
+    target_chain = kwargs.pop("chain", main_target.target_chain) # backward comp
     chains = f"{target_chain},{binder_chain}" if redesign else target_chain
     im = [True] * len(target_chain.split(",")) 
     if redesign: im += [ignore_missing] * len(binder_chain.split(","))
 
-    self._pdb = prep_pdb(pdb_filename, chain=chains, ignore_missing=im)
-    res_idx = self._pdb["residue_index"]
+    self.main_target = main_target
+    self.main_target._pdb = prep_pdb(main_target.pdb_filename, 
+                                     chain=main_target.target_chain, 
+                                     ignore_missing=im
+                                    )
+    res_idx = self.main_target._pdb["residue_index"]
+
+    self.negative_targets = negative_targets
+    for neg_target in self.negative_targets:
+      neg_target._pdb = prep_pdb(neg_target.pdb_filename,
+                                 chain=neg_target.target_chain,
+                                 ignore_missing=im
+                                )
 
     if redesign:
-      self._target_len = sum([(self._pdb["idx"]["chain"] == c).sum() for c in target_chain.split(",")])
-      self._binder_len = sum([(self._pdb["idx"]["chain"] == c).sum() for c in binder_chain.split(",")])
+      self.main_target._target_len = sum([(self.main_target._pdb["idx"]["chain"] == c).sum() for c in target_chain.split(",")])
+      self._binder_len = sum([(self.main_target._pdb["idx"]["chain"] == c).sum() for c in binder_chain.split(",")])
     else:
-      self._target_len = self._pdb["residue_index"].shape[0]
+      self.main_target._target_len = self.main_target._pdb["residue_index"].shape[0]
+      for neg_target in self.negative_targets:
+        neg_target._target_len = neg_target._pdb["residue_index"].shape[0]
+
       self._binder_len = binder_len
       res_idx = np.append(res_idx, res_idx[-1] + np.arange(binder_len) + 50)
     
     self._len = self._binder_len
-    self._lengths = [self._target_len, self._binder_len]
+    self.main_target._lengths = [self.main_target._target_len, self._binder_len]
+    for neg_target in self.negative_targets:
+      neg_target._lengths = [neg_target._target_len, self._binder_len]
 
     # gather hotspot info
+    hotspot = self.main_target.target_hotspot_residues
     if hotspot is not None:
-      self.opt["hotspot"] = prep_pos(hotspot, **self._pdb["idx"])["pos"]
+      self.opt["hotspot"] = prep_pos(hotspot, **self.main_target._pdb["idx"])["pos"]
 
     if redesign:
       # binder redesign
-      self._wt_aatype = self._pdb["batch"]["aatype"][self._target_len:]
+      self._wt_aatype = self._pdb["batch"]["aatype"][self.main_target._target_len:]
       self.opt["weights"].update({"dgram_cce":1.0, "rmsd":0.0, "fape":0.0,
                                   "con":0.0, "i_con":0.0, "i_pae":0.0})
     else:
       # binder hallucination
-      self._pdb["batch"] = make_fixed_size(self._pdb["batch"], num_res=sum(self._lengths))
+      self.main_target._pdb["batch"] = make_fixed_size(self.main_target._pdb["batch"], 
+                                                       num_res=sum(self.main_target._lengths))
+      for neg_target in self.negative_targets:
+        neg_target._pdb["batch"] = make_fixed_size(neg_target._pdb["batch"],
+                                                   num_res=sum(neg_target._lengths)
+                                                  )
       self.opt["weights"].update({"plddt":0.1, "con":0.0, "i_con":1.0, "i_pae":0.0})
 
     # configure input features
-    self._inputs = self._prep_features(num_res=sum(self._lengths), num_seq=1)
-    self._inputs["residue_index"] = res_idx
-    self._inputs["batch"] = self._pdb["batch"]
-    self._inputs.update(get_multi_id(self._lengths))
+    self.main_target._inputs = self._prep_features(num_res=sum(self.main_target._lengths), num_seq=1)
+    self.main_target._inputs["residue_index"] = res_idx
+    self.main_target._inputs["batch"] = self.main_target._pdb["batch"]
+    self.main_target._inputs.update(get_multi_id(self.main_target._lengths))
+
+    for neg_target in self.negative_targets:
+      neg_res_idx = neg_target._pdb["residue_index"]
+      neg_res_idx = np.append(neg_res_idx, neg_res_idx[-1] + np.arange(binder_len) + 50)
+      neg_target._inputs = self._prep_features(num_res=sum(neg_target._lengths), num_seq=1)
+      neg_target._inputs["residue_index"] = neg_res_idx
+      neg_target._inputs["batch"] = neg_target._pdb["batch"]
+      neg_target._inputs.update(get_multi_id(neg_target._lengths))
+
 
     # configure template rm masks
-    (T,L,rm) = (self._lengths[0],sum(self._lengths),{})
-    rm_opt = {
-              "rm_template":    {"target":rm_target,    "binder":rm_binder},
-              "rm_template_seq":{"target":rm_target_seq,"binder":rm_binder_seq},
-              "rm_template_sc": {"target":rm_target_sc, "binder":rm_binder_sc}
-             }
-    for n,x in rm_opt.items():
-      rm[n] = np.full(L,False)
-      for m,y in x.items():
-        if isinstance(y,str):
-          rm[n][prep_pos(y,**self._pdb["idx"])["pos"]] = True
-        else:
-          if m == "target": rm[n][:T] = y
-          if m == "binder": rm[n][T:] = y
-        
+    for target in [self.main_target, *self.negative_targets]:
+      (T,L,rm) = (target._lengths[0],sum(target._lengths),{})
+      rm_opt = {
+                "rm_template":    {"target":rm_target,    "binder":rm_binder},
+                "rm_template_seq":{"target":rm_target_seq,"binder":rm_binder_seq},
+                "rm_template_sc": {"target":rm_target_sc, "binder":rm_binder_sc}
+               }
+      for n,x in rm_opt.items():
+        rm[n] = np.full(L,False)
+        for m,y in x.items():
+          if isinstance(y,str):
+            rm[n][prep_pos(y,**target._pdb["idx"])["pos"]] = True
+          else:
+            if m == "target": rm[n][:T] = y
+            if m == "binder": rm[n][T:] = y
+
+      target._inputs.update(rm)
+      
     # set template [opt]ions
     self.opt["template"]["rm_ic"] = rm_template_ic
-    self._inputs.update(rm)
 
-    self._prep_model(**kwargs)
+    self._prep_model_binder(**kwargs)
 
   def _prep_partial(self, pdb_filename, chain=None, length=None,
                     copies=1, repeat=False, homooligomer=False,

@@ -1,3 +1,4 @@
+from functools import partial
 import os
 import jax
 import jax.numpy as jnp
@@ -243,3 +244,198 @@ class mk_af_model(design_model, _af_inputs, _af_loss, _af_prep, _af_design, _af_
     
     return {"grad_fn":jax.jit(jax.value_and_grad(_model, has_aux=True, argnums=0)),
             "fn":jax.jit(_model), "runner":runner}
+
+  def _get_model_binder(self, cfg, callback=None):
+    a = self._args
+    runner = model.RunModel(cfg,
+                            recycle_mode=a["recycle_mode"],
+                            use_multimer=a["use_multimer"])
+
+    # setup function to get gradients
+    def _model(params, model_params, input_dict, key):
+      """
+      params: prediction params
+      model_params: model weights
+      input_dict: dictionary containing keys "main_target" and "negative_targets"
+      """
+      main_target_inputs = input_dict["main_target"]
+      negative_target_inputs = input_dict["negative_targets"] # this is a list of inputs
+
+      main_target_inputs["params"] = params
+      opt = main_target_inputs["opt"]
+
+      for inputs in negative_target_inputs:
+        inputs["params"] = params
+
+      aux = {}
+      key = Key(key=key).get
+
+      #######################################################################
+      # INPUTS
+      #######################################################################
+      # get sequence
+      seq = self._get_seq(main_target_inputs, aux, key()) # shape of entire complex
+
+      # update sequence features
+      pssm = jnp.where(opt["pssm_hard"], seq["hard"], seq["pseudo"])
+      if a["use_mlm"]:
+        shape = seq["pseudo"].shape[:2]
+        mlm = jax.random.bernoulli(key(),opt["mlm_dropout"],shape)
+        update_seq(seq["pseudo"], main_target_inputs, seq_pssm=pssm, mlm=mlm)
+      else:
+        update_seq(seq["pseudo"], main_target_inputs, seq_pssm=pssm)
+
+      # update amino acid sidechain identity
+      update_aatype(seq["pseudo"][0].argmax(-1), main_target_inputs) 
+
+      # copy updates to the binder region to the negative targets
+      for target, inputs in zip(self.negative_targets, negative_target_inputs):
+        neg_seq = self._get_seq(inputs, aux, key(), target_len=target._target_len)
+        for seq_key, seq_value in seq.items(): # in main seq
+          sliced = seq_value[:, -self._binder_len, :]
+          neg_seq[seq_key] = neg_seq[seq_key].at[:, -self._binder_len, :].set(sliced)
+
+        pssm = jnp.where(opt["pssm_hard"], neg_seq["hard"], neg_seq["pseudo"])
+
+        if a["use_mlm"]:
+          shape = neg_seq["pseudo"].shape[:2]
+          mlm = jax.random.bernoulli(key(),opt["mlm_dropout"],shape)
+          update_seq(neg_seq["pseudo"], inputs, seq_pssm=pssm, mlm=mlm)
+        else:
+          update_seq(neg_seq["pseudo"], inputs, seq_pssm=pssm)
+
+        # update amino acid sidechain identity
+        update_aatype(neg_seq["pseudo"][0].argmax(-1), inputs) 
+
+
+      # define masks
+      main_target_inputs["msa_mask"] = jnp.where(main_target_inputs["seq_mask"],
+                                                 main_target_inputs["msa_mask"],
+                                                 0
+                                                )
+      for inputs in negative_target_inputs:
+        inputs["msa_mask"] = jnp.where(inputs["seq_mask"],
+                                       inputs["msa_mask"],
+                                       0
+                                      )
+
+      # update aux seq
+      main_target_inputs["seq"] = aux["seq"]
+      for inputs in negative_target_inputs: # copy updated seq to negative models
+        inputs["seq"] = aux["seq"]
+
+      # update template features
+      main_target_inputs["mask_template_interchain"] = opt["template"]["rm_ic"]
+      for inputs in negative_target_inputs:
+        inputs["mask_template_interchain"] = opt["template"]["rm_ic"]
+
+      if a["use_templates"]:
+        self._update_template(main_target_inputs, key())
+        for inputs in negative_target_inputs:
+          self._update_template(inputs, key())
+      
+      # set dropout
+      main_target_inputs["use_dropout"] = opt["dropout"]
+      for inputs in negative_target_inputs:
+        inputs["use_dropout"] = opt["dropout"]
+
+      if "batch" not in main_target_inputs:
+        main_target_inputs["batch"] = None
+
+      for inputs in negative_target_inputs:
+        if "batch" not in inputs:
+          inputs["batch"] = None
+
+      # pre callback
+      for fn in self._callbacks["model"]["pre"]:
+        fn_args = {"inputs":main_target_inputs, "opt":opt, "aux":aux,
+                   "seq":seq, "key":key(), "params":params}
+        sub_args = {k:fn_args.get(k,None) for k in signature(fn).parameters}
+        fn(**sub_args)
+      
+
+      #######################################################################
+      # OUTPUTS
+      #######################################################################
+      main_outputs = runner.apply(model_params, key(), main_target_inputs)
+      negative_outputs = [runner.apply(model_params, key(), inputs) for inputs in negative_target_inputs]
+
+      # add aux outputs
+      aux.update({"atom_positions": main_outputs["structure_module"]["final_atom_positions"],
+                  "atom_mask":      main_outputs["structure_module"]["final_atom_mask"],                  
+                  "residue_index":  main_target_inputs["residue_index"],
+                  "aatype":         main_target_inputs["aatype"],
+                  "plddt":          get_plddt(main_outputs),
+                  "pae":            get_pae(main_outputs), 
+                  "ptm":            get_ptm(main_target_inputs, main_outputs),
+                  "i_ptm":          get_ptm(main_target_inputs, main_outputs, interface=True), 
+                  "cmap":           get_contact_map(main_outputs, opt["con"]["cutoff"]),
+                  "i_cmap":         get_contact_map(main_outputs, opt["i_con"]["cutoff"]),
+                  "prev":           main_outputs["prev"]})
+
+      #######################################################################
+      # LOSS
+      #######################################################################
+      aux["losses"] = {}
+
+      # add protocol specific losses
+      self._get_loss(main_inputs=main_target_inputs,
+                     main_outputs=main_outputs,
+                     negative_inputs=negative_target_inputs, 
+                     negative_outputs=negative_outputs, 
+                     aux=aux)
+
+      # sequence entropy loss
+      aux["losses"].update(get_seq_ent_loss(main_target_inputs))
+      
+      # experimental masked-language-modeling
+      if a["use_mlm"]:
+        aux["mlm"] = outputs["masked_msa"]["logits"]
+        mask = jnp.where(main_target_inputs["seq_mask"],mlm,0)
+        aux["losses"].update(get_mlm_loss(outputs, mask=mask, truth=seq["pssm"]))
+
+      # run user defined callbacks for main target
+      for c in ["loss","post"]:
+        for fn in self._callbacks["model"][c]:
+          fn_args = {"inputs":main_target_inputs, "outputs":main_outputs, "opt":opt,
+                     "aux":aux, "seq":seq, "key":key(), "params":params}
+          sub_args = {k:fn_args.get(k,None) for k in signature(fn).parameters}
+          if c == "loss": aux["losses"].update(fn(**sub_args))
+          if c == "post": fn(**sub_args)
+
+      # weighted loss
+      w = opt["weights"]
+      loss = sum([v * w[k] if k in w else v for k,v in aux["losses"].items()])
+
+      # calculate loss for negative targets
+      negative_losses = []
+      for c in ["loss"]:
+        for inputs, outputs in zip(negative_target_inputs, negative_outputs):
+          neg_losses = {}
+          for fn in self._callbacks["model"][c]:
+            fn_args = {"inputs":inputs, "outputs":outputs, "opt":opt,
+                       "aux":aux, "seq":seq, "key":key(), "params":params}
+            sub_args = {k:fn_args.get(k,None) for k in signature(fn).parameters}
+            neg_losses.update(fn(**sub_args))
+
+          neg_loss = sum([v * w[k] if k in w else v for k,v in neg_losses.items()])
+          negative_losses.append(neg_loss)
+      mean_neg_loss = jnp.mean(jnp.array(negative_losses))
+      
+      print(w.keys())
+      if 'selectivity_loss' in w and len(negative_losses) > 0:
+        # smaller loss = better; therefore, subtract loss for negative targets!
+        loss -= w['selectivity_loss'] * mean_neg_loss
+        aux["neg_loss"] = -1 * (w['selectivity_loss'] * mean_neg_loss)
+      
+      aux["total_loss"] = loss
+      
+      # save for debugging
+      if a["debug"]:
+        aux["debug"] = {"inputs":main_target_inputs, "outputs":main_outputs}
+  
+      return loss, aux
+    
+    return {"grad_fn":jax.jit(jax.value_and_grad(_model, has_aux=True, argnums=0)),
+            "fn":jax.jit(_model), 
+            "runner":runner}
