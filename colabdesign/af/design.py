@@ -461,7 +461,7 @@ class _af_design:
   def design_3stage(self, soft_iters=300, temp_iters=100, hard_iters=10,
                     ramp_recycles=True, **kwargs):
     '''three stage design (logits→soft→hard)'''
-
+    print('Running design_3stage search')   
     verbose = kwargs.get("verbose",1)
 
     # stage 1: logits -> softmax(logits/1.0)
@@ -521,7 +521,8 @@ class _af_design:
   def design_semigreedy(self, iters=100, tries=10, dropout=False,
                         save_best=True, seq_logits=None, e_tries=None, **kwargs):
 
-    '''semigreedy search'''    
+    '''semigreedy search'''
+    print('Running semigreedy search')   
     if e_tries is None: e_tries = tries
 
     # get starting sequence
@@ -576,7 +577,7 @@ class _af_design:
 
   def design_pssm_semigreedy(self, soft_iters=300, hard_iters=32, tries=10, e_tries=None,
                              ramp_recycles=True, ramp_models=True, **kwargs):
-
+    print('Running design_pssm_semigreedy search')   
     verbose = kwargs.get("verbose",1)
 
     # stage 1: logits -> softmax(logits)
@@ -616,7 +617,7 @@ class _af_design:
     '''
 
     # code borrowed from: github.com/bwicky/oligomer_hallucination
-
+    print('Running design_mcmc')   
     # gather settings
     verbose = kwargs.pop("verbose",1)
     model_flags = {k:kwargs.pop(k,None) for k in ["num_models","sample_models","models"]}

@@ -215,6 +215,7 @@ def soft_seq(x, bias, opt, key=None, num_seq=None, shuffle_first=True):
       seq["input"] = seq["input"][n[:num_seq]]
 
   # straight-through/reparameterization
+  print('straight-through / reparameterization')
   seq["logits"] = seq["input"] * opt["alpha"]
   if bias is not None: seq["logits"] = seq["logits"] + bias
   seq["pssm"] = jax.nn.softmax(seq["logits"])
