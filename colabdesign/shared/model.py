@@ -123,12 +123,7 @@ class design_model:
 
     # set seq/bias/state
     self._params["seq"] = x
-    if self.protocol == 'binder':
-      self.main_target._inputs["bias"] = b
-      for target in self.negative_targets:
-        target._inputs["bias"] = b
-    else:
-      self._inputs["bias"] = b 
+    self._inputs["bias"] = b 
 
   def _norm_seq_grad(self):
     g = self.aux["grad"]["seq"]
@@ -215,7 +210,6 @@ def soft_seq(x, bias, opt, key=None, num_seq=None, shuffle_first=True):
       seq["input"] = seq["input"][n[:num_seq]]
 
   # straight-through/reparameterization
-  print('straight-through / reparameterization')
   seq["logits"] = seq["input"] * opt["alpha"]
   if bias is not None: seq["logits"] = seq["logits"] + bias
   seq["pssm"] = jax.nn.softmax(seq["logits"])

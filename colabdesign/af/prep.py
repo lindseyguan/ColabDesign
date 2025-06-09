@@ -249,7 +249,6 @@ class _af_prep:
     self._inputs["batch"] = self._pdb["batch"]
     self._inputs.update(get_multi_id(self._lengths))
     self._negative_target = target.negative_target
-    print('Prepped negative target')
 
     # configure template rm masks
     (T,L,rm) = (self._lengths[0],sum(self._lengths),{})
@@ -271,11 +270,8 @@ class _af_prep:
     self.opt["template"]["rm_ic"] = rm_template_ic
     self._inputs.update(rm)
 
-    print('Finished prepping inputs')
     if not target_update:
       self._prep_model(**kwargs)
-    else:
-      print('--target update')
 
   def _prep_partial(self, pdb_filename, chain=None, length=None,
                     copies=1, repeat=False, homooligomer=False,

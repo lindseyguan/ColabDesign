@@ -94,10 +94,7 @@ class _af_design:
     auxs = []
     for n in model_nums:
       p = self._model_params[n]
-      if self.protocol == 'binder':
-        auxs.append(self._recycle_binder(p, num_recycles=num_recycles, backprop=backprop))
-      else:
-        auxs.append(self._recycle(p, num_recycles=num_recycles, backprop=backprop))
+      auxs.append(self._recycle(p, num_recycles=num_recycles, backprop=backprop))
     auxs = jax.tree_map(lambda *x: np.stack(x), *auxs)
 
     # update aux (average outputs)
@@ -116,11 +113,6 @@ class _af_design:
     self.aux["log"] = {**self.aux["losses"]}
     self.aux["log"]["plddt"] = 1 - self.aux["log"]["plddt"]
     for k in ["loss","i_ptm","ptm"]: self.aux["log"][k] = self.aux[k]
-    if "neg_loss" in self.aux:
-      self.aux["log"]['neg_loss'] = self.aux['neg_loss']
-    if "total_loss" in self.aux:
-      self.aux["log"]['total_loss'] = self.aux['total_loss']
-
     for k in ["hard","soft","temp"]: self.aux["log"][k] = self.opt[k]
 
     # compute sequence recovery
@@ -150,30 +142,18 @@ class _af_design:
     else:
       loss, aux = self._model["fn"](*flags)
       grad = jax.tree_map(np.zeros_like, self._params)
-    aux.update({"loss":loss,"grad":grad})
-    return aux
+    if self._negative_target:
+      # recalculate loss using only these terms:
+      losses_of_interest = ['con', 'i_con', 'i_pae', 'i_ptm', 'pae', 'plddt']
+      loss = 0
+      for k in losses_of_interest:
+        if k in self.opt["weights"]:
+          loss += self.opt["weights"][k] * aux["losses"][k]
+        else:
+          loss += aux["losses"][k]
+      loss = (-1 * loss) + 10 # add constant to loss to make it positive
 
-  def _single_binder(self, model_params, backprop=True):
-    '''single pass through the model for binder design'''
-    self.main_target._inputs["opt"] = self.opt
-    for target in self.negative_targets:
-      target._inputs["opt"] = self.opt
-
-    input_dict = {"main_target": self.main_target._inputs,
-                  "negative_targets": [nt._inputs for nt in self.negative_targets],
-                 }
-    flags = [self._params, 
-              model_params, 
-              # self.main_target._inputs,
-              input_dict,
-              self.key()
-             ]
-
-    if backprop:
-      (loss, aux), grad = self._model["grad_fn"](*flags)
-    else:
-      loss, aux = self._model["fn"](*flags)
-      grad = jax.tree_map(np.zeros_like, self._params)
+    self._loss_tracker[self._current_loss_tracker].append(np.array(loss).item())
     aux.update({"loss":loss,"grad":grad})
     return aux
 
@@ -232,67 +212,6 @@ class _af_design:
         self._inputs["prev"] = aux["prev"]
         if a["use_initial_atom_pos"]:
           self._inputs["initial_atom_pos"] = aux["prev"]["prev_pos"]                
-
-      aux["grad"] = jax.tree_map(lambda *x: np.stack(x).sum(0), *grad)
-    
-    aux["num_recycles"] = num_recycles
-    return aux
-
-  def _recycle_binder(self, model_params, num_recycles=None, backprop=True):   
-    '''multiple passes through the model (aka recycle)'''
-    a = self._args
-    mode = a["recycle_mode"]
-    if num_recycles is None:
-      num_recycles = self.opt["num_recycles"]
-
-    if mode in ["backprop","add_prev"]:
-      # recycles compiled into model, only need single-pass
-      aux = self._single_binder(model_params, backprop)
-    
-    else:
-      L = self.main_target._inputs["residue_index"].shape[0]
-      
-      # intialize previous
-      if "prev" not in self.main_target._inputs or a["clear_prev"]:
-        prev = {'prev_msa_first_row': np.zeros([L,256]),
-                'prev_pair': np.zeros([L,L,128])}
-
-        if a["use_initial_guess"] and "batch" in self._inputs:
-          prev["prev_pos"] = self.main_target._inputs["batch"]["all_atom_positions"] 
-        else:
-          prev["prev_pos"] = np.zeros([L,37,3])
-
-        if a["use_dgram"]:
-          # TODO: add support for initial_guess + use_dgram
-          prev["prev_dgram"] = np.zeros([L,L,64])
-
-        if a["use_initial_atom_pos"]:
-          if "batch" in self.main_target._inputs:
-            self.main_target._inputs["initial_atom_pos"] = self.main_target._inputs["batch"]["all_atom_positions"] 
-          else:
-            self.main_target._inputs["initial_atom_pos"] = np.zeros([L,37,3])              
-      
-      self.main_target._inputs["prev"] = prev
-      # decide which layers to compute gradients for
-      cycles = (num_recycles + 1)
-      mask = [0] * cycles
-
-      if mode == "sample":  mask[np.random.randint(0,cycles)] = 1
-      if mode == "average": mask = [1/cycles] * cycles
-      if mode == "last":    mask[-1] = 1
-      if mode == "first":   mask[0] = 1
-      
-      # gather gradients across recycles 
-      grad = []
-      for m in mask:        
-        if m == 0:
-          aux = self._single_binder(model_params, backprop=False)
-        else:
-          aux = self._single_binder(model_params, backprop)
-          grad.append(jax.tree_map(lambda x:x*m, aux["grad"]))
-        self.main_target._inputs["prev"] = aux["prev"]
-        if a["use_initial_atom_pos"]:
-          self.main_target._inputs["initial_atom_pos"] = aux["prev"]["prev_pos"]                
 
       aux["grad"] = jax.tree_map(lambda *x: np.stack(x).sum(0), *grad)
     

@@ -23,13 +23,9 @@ class _af_inputs:
     # protocol specific modifications to seq features
     if self.protocol == "binder":
       # concatenate target and binder sequence
-      if not target_len:
-        seq_target = jax.nn.one_hot(inputs["batch"]["aatype"][:self.main_target._target_len],self._args["alphabet_size"])
-      else:
-        seq_target = jax.nn.one_hot(inputs["batch"]["aatype"][:target_len],self._args["alphabet_size"])
-
+      seq_target = jax.nn.one_hot(inputs["batch"]["aatype"][:self._target_len],self._args["alphabet_size"])
       seq_target = jnp.broadcast_to(seq_target,(self._num, *seq_target.shape))
-      seq = jax.tree_map(lambda x:jnp.concatenate([seq_target,x],1), seq)
+      seq = jax.tree_util.tree_map(lambda x:jnp.concatenate([seq_target,x],1), seq)
       
     if self.protocol in ["fixbb","hallucination","partial"] and self._args["copies"] > 1:
       seq = jax.tree_map(lambda x:expand_copies(x, self._args["copies"], self._args["block_diag"]), seq)
