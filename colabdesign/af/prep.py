@@ -182,6 +182,7 @@ class _af_prep:
                    
                    # if binder_chain is defined
                    binder_chain=None,
+                   use_binder_template=False,
                    rm_binder=True,
                    rm_binder_seq=True,
                    rm_binder_sc=True,
@@ -204,7 +205,7 @@ class _af_prep:
     ---------------------------------------------------
     '''
     redesign = binder_chain is not None
-    rm_binder = not kwargs.pop("use_binder_template", not rm_binder)
+    rm_binder = (not use_binder_template) or (rm_binder)
     
     self._args.update({"redesign":redesign})
 
@@ -218,6 +219,7 @@ class _af_prep:
     res_idx = self._pdb["residue_index"]
 
     if redesign:
+      print('Redesigning existing binder input...')
       self._target_len = sum([(self._pdb["idx"]["chain"] == c).sum() for c in target_chain.split(",")])
       self._binder_len = sum([(self._pdb["idx"]["chain"] == c).sum() for c in binder_chain.split(",")])
     else:

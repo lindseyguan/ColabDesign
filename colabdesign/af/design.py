@@ -142,18 +142,30 @@ class _af_design:
     else:
       loss, aux = self._model["fn"](*flags)
       grad = jax.tree_map(np.zeros_like, self._params)
+
+    losses_of_interest = ['con', 'i_con', 'i_pae', 'i_ptm', 'pae', 'plddt']
     if self._negative_target:
       # recalculate loss using only these terms:
-      losses_of_interest = ['con', 'i_con', 'i_pae', 'i_ptm', 'pae', 'plddt']
+      negative_losses = ['i_pae', 'i_ptm'] # only negate these terms
       loss = 0
       for k in losses_of_interest:
+        negation = 1
+        if k in negative_losses:
+          negation = -1
         if k in self.opt["weights"]:
-          loss += self.opt["weights"][k] * aux["losses"][k]
+          loss += negation * self.opt["weights"][k] * aux["losses"][k]
         else:
-          loss += aux["losses"][k]
-      loss = (-1 * loss) + 10 # add constant to loss to make it positive
+          loss += negation * aux["losses"][k]
 
-    self._loss_tracker[self._current_loss_tracker].append(np.array(loss).item())
+    if "losses" in aux:
+      loss_dict = {}
+      for k in losses_of_interest:
+        if k in aux["losses"]:
+          loss_dict[k] = np.array(aux["losses"][k]).item()
+      loss_dict['loss'] = np.array(loss).item() # update with new loss definition (inc. neg. targ.)
+
+      self._loss_tracker[self._current_loss_tracker].append(loss_dict)
+      
     aux.update({"loss":loss,"grad":grad})
     return aux
 
@@ -248,7 +260,7 @@ class _af_design:
             "sc_fape","sc_rmsd","dgram_cce","fape","plddt","ptm"]
     
     if "i_ptm" in aux["log"]:
-      if hasattr(self,"main_target") and len(self.main_target._lengths) > 1:
+      if len(self._lengths) > 1:
         keys.append("i_ptm")
       else:
         aux["log"].pop("i_ptm")
@@ -263,6 +275,7 @@ class _af_design:
     self._tmp["log"].append(aux["log"])    
     if (self._k % self._args["traj_iter"]) == 0:
       # update traj
+      print('Updating traj...')
       traj = {"seq":   aux["seq"]["pseudo"],
               "xyz":   aux["atom_positions"][:,1,:],
               "plddt": aux["plddt"],
@@ -459,7 +472,7 @@ class _af_design:
     # get current plddt
     aux = self.predict(seq, return_aux=True, verbose=False, **model_flags, **kwargs)
     plddt = self.aux["plddt"]
-    plddt = plddt[self.main_target._target_len:] if self.protocol == "binder" else plddt[:self._len]
+    plddt = plddt[self._target_len:] if self.protocol == "binder" else plddt[:self._len]
 
     # optimize!
     if verbose:
@@ -470,12 +483,8 @@ class _af_design:
       model_nums = self._get_model_nums(**model_flags)
       num_tries = (tries+(e_tries-tries)*((i+1)/iters))
       for t in range(int(num_tries)):
-        if self.protocol == "binder":
-          mut_seq = self._mutate(seq=seq, plddt=plddt,
-                                 logits=seq_logits + self.main_target._inputs["bias"])
-        else:
-          mut_seq = self._mutate(seq=seq, plddt=plddt,
-                                 logits=seq_logits + self._inputs["bias"])
+        mut_seq = self._mutate(seq=seq, plddt=plddt,
+                               logits=seq_logits + self._inputs["bias"])
         aux = self.predict(seq=mut_seq, return_aux=True, model_nums=model_nums, verbose=False, **kwargs)
         buff.append({"aux":aux, "seq":np.array(mut_seq)})
 
@@ -483,15 +492,12 @@ class _af_design:
       losses = [x["aux"]["loss"] for x in buff]
       best = buff[np.argmin(losses)]
       self.aux, seq = best["aux"], jnp.array(best["seq"])
-      if self.protocol == "binder":
-        self.set_seq(seq=seq, bias=self.main_target._inputs["bias"])
-      else:
-        self.set_seq(seq=seq, bias=self._inputs["bias"])
+      self.set_seq(seq=seq, bias=self._inputs["bias"])
       self._save_results(save_best=save_best, verbose=verbose)
 
       # update plddt
       plddt = best["aux"]["plddt"]
-      plddt = plddt[self.main_target._target_len:] if self.protocol == "binder" else plddt[:self._len]
+      plddt = plddt[self._target_len:] if self.protocol == "binder" else plddt[:self._len]
       self._k += 1
 
   def design_pssm_semigreedy(self, soft_iters=300, hard_iters=32, tries=10, e_tries=None,
@@ -563,7 +569,11 @@ class _af_design:
 
       # get loss
       model_nums = self._get_model_nums(**model_flags)
-      aux = self.predict(seq=mut_seq, return_aux=True, verbose=False, model_nums=model_nums, **kwargs)
+      aux = self.predict(seq=mut_seq, 
+                         return_aux=True, 
+                         verbose=False, 
+                         model_nums=model_nums, 
+                         **kwargs)
       loss = aux["log"]["loss"]
   
       # decide
@@ -574,7 +584,7 @@ class _af_design:
         (current_seq,current_loss) = (mut_seq,loss)
         
         plddt = aux["all"]["plddt"].mean(0)
-        plddt = plddt[self.main_target._target_len:] if self.protocol == "binder" else plddt[:self._len]
+        plddt = plddt[self._target_len:] if self.protocol == "binder" else plddt[:self._len]
         
         if loss < best_loss:
           (best_loss, self._k) = (loss, i)

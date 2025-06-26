@@ -76,10 +76,7 @@ class _af_utils:
     def to_pdb_str(x, n=None):
       p_str = protein.to_pdb(protein.Protein(**x))
       p_str = "\n".join(p_str.splitlines()[1:-2])
-      if hasattr(self,"main_target"):
-        if renum_pdb: p_str = renum_pdb_str(p_str, self.main_target._lengths)
-      else:
-        if renum_pdb: p_str = renum_pdb_str(p_str, self._lengths)
+      if renum_pdb: p_str = renum_pdb_str(p_str, self._lengths)
 
       if n is not None:
         p_str = f"MODEL{n:8}\n{p_str}\nENDMDL\n"
@@ -110,10 +107,7 @@ class _af_utils:
       aux = self._tmp["best"]["aux"] if (get_best and "aux" in self._tmp["best"]) else self.aux
     aux = aux["all"]    
     if self.protocol in ["fixbb","binder"]:
-      if self.protocol == "binder":
-        pos_ref = self.main_target._inputs["batch"]["all_atom_positions"][:,1].copy()
-      else:
-        pos_ref = self._inputs["batch"]["all_atom_positions"][:,1].copy()
+      pos_ref = self._inputs["batch"]["all_atom_positions"][:,1].copy()
       pos_ref[(pos_ref == 0).any(-1)] = np.nan
     else:
       pos_ref = aux["atom_positions"][0,:,1,:]
@@ -122,10 +116,7 @@ class _af_utils:
     sub_traj = {k:v[s:e] for k,v in traj.items()}
 
     align_xyz = self.protocol == "hallucination"
-    if self.protocol == 'binder':
-      lengths = self.main_target._lengths
-    else:
-      lengths = self._lengths
+    lengths = self._lengths
     return make_animation(**sub_traj, pos_ref=pos_ref, length=lengths,
                           color_by=color_by, align_xyz=align_xyz, dpi=dpi) 
 

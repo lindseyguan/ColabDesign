@@ -61,6 +61,7 @@ class mk_af_model(design_model, _af_inputs, _af_loss, _af_prep, _af_design, _af_
 
     self._loss_tracker = {'test_logits': []}
     self._current_loss_tracker = 'test_logits'
+    self._negative_target = False
 
     # set arguments/options
     if "initial_guess" in kwargs: kwargs["use_initial_guess"] = kwargs.pop("initial_guess")
