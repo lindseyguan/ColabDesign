@@ -66,7 +66,7 @@ def dict_to_str(x, filt=None, keys=None, ok=None, print_str=None, f=2):
   for k in keys:
     if k in x and (filt.get(k,True) or k in ok):
       v = x[k]
-      if isinstance(v,float):
+      if isinstance(v,float) and not np.isnan(v):
         if int(v) == v:
           print_str += f" {k} {int(v)}"
         else:
