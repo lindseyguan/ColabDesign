@@ -143,25 +143,31 @@ class _af_design:
       loss, aux = self._model["fn"](*flags)
       grad = jax.tree_map(np.zeros_like, self._params)
 
-    losses_of_interest = ['con', 'i_con', 'i_pae', 'i_ptm', 'pae', 'plddt']
-    if self._negative_target:
-      # recalculate loss using only these terms:
-      negative_losses = ['i_pae', 'i_ptm'] # only negate these terms
-      loss = 0
-      for k in losses_of_interest:
-        negation = 1
-        if k in negative_losses:
-          negation = -1
-        if k in self.opt["weights"]:
-          loss += negation * self.opt["weights"][k] * aux["losses"][k]
-        else:
-          loss += negation * aux["losses"][k]
-
-    if "losses" in aux:
+    if 'losses' in aux:
       loss_dict = {}
-      for k in losses_of_interest:
-        if k in aux["losses"]:
-          loss_dict[k] = np.array(aux["losses"][k]).item()
+      if self._negative_target:
+        # recalculate loss using only these terms:
+        losses_of_interest = ['con', 'i_con', 'i_pae', 'i_ptm', 'pae', 'plddt', 'rmsd']
+        negative_losses = ['i_pae', 'i_ptm', 'i_con'] # only negate these terms
+        loss = 0
+        for k in losses_of_interest:
+          negation = 1
+          if k in negative_losses:
+            negation = -1
+          if k in self.opt["weights"]:
+            term = negation * self.opt["weights"][k] * aux["losses"][k]
+            loss += term
+          else:
+            term = negation * aux["losses"][k]
+            loss += term
+          loss_dict[k] = np.array(term).item()
+      else: # this part is only needed for loss tracking
+        for k, v in aux["losses"].items():
+          if k in self.opt["weights"]:
+            loss_dict[k] = self.opt["weights"][k] * np.array(v).item()
+          else:
+            loss_dict[k] = np.array(v).item()
+
       loss_dict['loss'] = np.array(loss).item() # update with new loss definition (inc. neg. targ.)
 
       self._loss_tracker[self._current_loss_tracker].append(loss_dict)
